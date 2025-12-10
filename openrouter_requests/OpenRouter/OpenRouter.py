@@ -50,6 +50,9 @@ class OpenRouter:
             data: str,
             role: str,
             dialog_id: Optional[str] = None,
+            image: Optional[bytes] = None,
+            image_format: Optional[str] = None,
+
     ) -> Dict[str, Any]:
 
         if dialog_id is not None and hasattr(self.context, "set_dialog"):
@@ -57,11 +60,21 @@ class OpenRouter:
         extra: Dict[str, Any] = {}
         if dialog_id is not None:
             extra["dialog_id"] = dialog_id
-        await self.context.add_to_context(
-            data=data,
-            role=role,
-            **extra,
-        )
+
+        if image is not None and image_format is not None:
+            await self.context.add_image_to_context(
+                text=data,
+                role=role,
+                image_bytes=image,
+                image_format=image_format,
+                **extra
+            )
+        else:
+            await self.context.add_to_context(
+                data=data,
+                role=role,
+                **extra,
+            )
         if self.rag_module is not None:
             rag_docs = await self._rag_search(query=data)
             await self._add_rag_context(rag_docs, dialog_id=dialog_id)
