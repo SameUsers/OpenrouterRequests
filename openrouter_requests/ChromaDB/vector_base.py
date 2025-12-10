@@ -3,22 +3,34 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any, Dict, List, Optional, Sequence
-
+import threading
 import chromadb
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
+from loguru import logger
 
 
 class ChromaVectorStore:
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
 
     def __init__(
-            self,
-            collection_name: str = "default_docs",
-            model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
-            client: Optional[ClientAPI] = None,
+        self,
+        collection_name: str = "default_docs",
+        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        client: Optional["ClientAPI"] = None,
     ) -> None:
+        if self._initialized:
+            return
 
         if client is None:
             client = chromadb.PersistentClient(
@@ -26,11 +38,18 @@ class ChromaVectorStore:
                 settings=Settings(allow_reset=True),
             )
 
-        self._client: ClientAPI = client
-        self._collection: Collection = self._client.get_or_create_collection(
+        self._client: "ClientAPI" = client
+        self._collection: "Collection" = self._client.get_or_create_collection(
             name=collection_name,
         )
         self._model = SentenceTransformer(model_name, device="cpu")
+        self._initialized = True
+        logger.success(
+            "Инициализирован синглтон класса {} с параметрками {}",
+            self.__class__.__name__,
+            self.__dict__
+        )
+
 
     async def add_document(
             self,

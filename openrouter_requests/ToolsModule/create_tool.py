@@ -1,9 +1,30 @@
 import inspect
+import threading
 from typing import List, Dict, Any, Type, Optional, get_type_hints, Union
 from abc import ABC
+from loguru import logger
 
 
 class Tools(ABC):
+    _instance = None
+    _lock = threading.Lock()
+    def __new__(cls, *args, **kwargs):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+
+    def __init__(self):
+        if not hasattr(self, '_initialized') or not self._initialized:
+            super().__init__()
+            self._initialized = True
+            logger.success(
+                "Инициализирован синглтон класса {} с параметрками {}",
+                self.__class__.__name__,
+                self.__dict__
+            )
+
     @staticmethod
     async def generate_tools_from_class(
             cls: Type["Tools"],

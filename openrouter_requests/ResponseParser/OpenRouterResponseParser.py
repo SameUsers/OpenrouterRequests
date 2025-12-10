@@ -1,13 +1,16 @@
 import json
 from typing import Any, Dict, List
 from openrouter_requests.ResponseParser.BaseResponseParser import BaseResponseParser
-
+from loguru import logger
 
 class OpenrouterResponseParser(BaseResponseParser):
 
     def __init__(self) -> None:
-
-        pass
+        logger.success(
+            "Инициализирован класс {} с параметрками {}",
+            self.__class__.__name__,
+            self.__dict__
+        )
 
     async def parse(self, response: Dict[str, Any]) -> Dict[str, Any]:
 

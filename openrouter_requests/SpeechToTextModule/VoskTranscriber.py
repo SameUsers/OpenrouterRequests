@@ -1,5 +1,6 @@
 from vosk import Model, KaldiRecognizer
 import json
+from loguru import logger
 
 
 class VoskService:
@@ -23,6 +24,11 @@ class VoskService:
             self.__class__._model = Model(model_path)
             self.__class__._recognizer = KaldiRecognizer(self.__class__._model, 16000)
             self.__class__._initialized = True
+            logger.success(
+                "Инициализирован синглтон класса {} с параметрками {}",
+                self.__class__.__name__,
+                self.__dict__
+            )
 
     @classmethod
     async def recognize(cls, chunk):

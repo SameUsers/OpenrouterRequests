@@ -11,9 +11,20 @@ from openrouter_requests.ToolsModule.tool_runner import ToolRunner
 from openrouter_requests.ChromaDB.vector_base import ChromaVectorStore
 from openrouter_requests.ContextStorage.BaseContextManager import BaseContextManager
 from openrouter_requests.ResponseParser.BaseResponseParser import BaseResponseParser
-
+import threading
+from openrouter_requests.schemas import OpenrouterRequest
+from loguru import logger
 
 class OpenRouter:
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
 
     def __init__(
             self,
@@ -24,32 +35,42 @@ class OpenRouter:
             context: Type[BaseContextManager] = LinearContextManager,
             parser: Type[BaseResponseParser] = OpenrouterResponseParser,
             tool_class: Type[Tools] = ToolRunner,
-            rag_store: Optional[ChromaVectorStore] = None,
-    ) -> None:
+            rag_store: Optional[ChromaVectorStore] = None) -> None:
 
-        self.model = model
-        if not api_key:
-            raise ValueError("Api key is None")
-        self.api_key = api_key
-        self.base_url = base_url
-        self.request_processor: Transport = transport()
-        self.context = context()
-        self.builder = OpenrouterRequestBuilder()
-        self.parser = parser()
-        self.rag_module: Optional[ChromaVectorStore] = rag_store or ChromaVectorStore()
-        self._tool_class: Type[Tools] = tool_class
-        self._tool_instance: Tools = tool_class()
-        self._tools_schema: List[Dict[str, Any]] | None = None
-        self.header = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        if not hasattr(self, "_initialized") or not self._initialized:
+            self.model = model
+            if not api_key:
+                raise ValueError("Api key is None")
+            self.api_key = api_key
+            self.base_url = base_url
+            self.request_processor: Transport = transport()
+            self.context = context()
+            self.builder = OpenrouterRequestBuilder()
+            self.parser = parser()
+            self.rag_module: Optional[ChromaVectorStore] = rag_store or ChromaVectorStore()
+            self._tool_class: Type[Tools] = tool_class
+            self._tool_instance: Tools = tool_class()
+            self._tools_schema: List[Dict[str, Any]] | None = None
+            self.header = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+            self._initialized = True
+            logger.success(
+                "Инициализирован синглтон класса {} с параметрками {}",
+                self.__class__.__name__,
+                self.__dict__
+            )
+
 
     async def send(
             self,
             data: str,
             role: str,
             dialog_id: Optional[str] = None,
+            image: Optional[bytes] = None,
+            image_format: Optional[str] = None,
+
     ) -> Dict[str, Any]:
 
         if dialog_id is not None and hasattr(self.context, "set_dialog"):
@@ -57,21 +78,31 @@ class OpenRouter:
         extra: Dict[str, Any] = {}
         if dialog_id is not None:
             extra["dialog_id"] = dialog_id
-        await self.context.add_to_context(
-            data=data,
-            role=role,
-            **extra,
-        )
+
+        if image is not None and image_format is not None:
+            await self.context.add_image_to_context(
+                text=data,
+                role=role,
+                image_bytes=image,
+                image_format=image_format,
+                **extra
+            )
+        else:
+            await self.context.add_to_context(
+                data=data,
+                role=role,
+                **extra,
+            )
         if self.rag_module is not None:
             rag_docs = await self._rag_search(query=data)
             await self._add_rag_context(rag_docs, dialog_id=dialog_id)
-        current_context = await self.context.get_context()
-        tools = await self._get_tools_schema()
-        payload = await self.builder.build_request(
-            model=self.model,
-            context=current_context,
-            tools=tools,
-        )
+
+        payload = await self.builder.build_request(data=OpenrouterRequest(
+            model = self.model,
+            messages = await self.context.get_context(),
+            tools = await self._get_tools_schema()
+        ))
+
         response = await self.request_processor.post(
             url=self.base_url,
             headers=self.header,
@@ -92,17 +123,19 @@ class OpenRouter:
                     **(call["arguments"] or {}),
                 )
                 tool_results.append(result)
-            current_context = await self.context.get_context()
-            payload_followup = await self.builder.build_request(
-                model=self.model,
-                context=current_context,
-                tools=tools,
-            )
+
+            payload_followup = await self.builder.build_request(OpenrouterRequest(
+                model = self.model,
+                messages = await self.context.get_context(),
+                tools = await self._get_tools_schema()
+            ))
+
             response_followup = await self.request_processor.post(
                 url=self.base_url,
                 headers=self.header,
                 payload=payload_followup,
             )
+
             parsed_followup = await self.parser.parse(response_followup)
             if parsed_followup["type"] == "message":
                 await self._add_assistant_message_to_context(parsed_followup, dialog_id=dialog_id)
