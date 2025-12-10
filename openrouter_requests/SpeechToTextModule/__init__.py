@@ -1,0 +1,1 @@
+from openrouter_requests.SpeechToTextModule.VoskTranscriber import VoskService
