@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 class OpenrouterRequest(BaseModel):
     model: str = Field(...)
-    messages: list[dict[str,str]]
-    tools: list[dict[str, Any]] | None = None
+    messages: List[Dict[str, Any]]
+    tools: Optional[List[Dict[str, Any]]] = None

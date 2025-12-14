@@ -1,15 +1,25 @@
 from typing import Any, Dict, List, Optional
 from openrouter_requests.ContextStorage.BaseContextManager import BaseContextManager
-
+import threading
 
 class DictContextManager(BaseContextManager):
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
 
     def __init__(self, max_messages: int = 30, default_dialog_id: str = "default") -> None:
-
-        self._dialogs: Dict[str, List[Dict[str, Any]]] = {}
-        self._max_messages = max_messages
-        self._current_dialog_id = default_dialog_id
-        self._dialogs.setdefault(default_dialog_id, [])
+        if not hasattr(self, "_initialized") or not self._initialized:
+            self._dialogs: Dict[str, List[Dict[str, Any]]] = {}
+            self._max_messages = max_messages
+            self._current_dialog_id = default_dialog_id
+            self._dialogs.setdefault(default_dialog_id, [])
+            self._initialized = True
 
     async def set_dialog(self, dialog_id: str) -> None:
         dialog_id = str(dialog_id)

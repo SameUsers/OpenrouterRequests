@@ -13,7 +13,9 @@ from openrouter_requests.ContextStorage.BaseContextManager import BaseContextMan
 from openrouter_requests.ResponseParser.BaseResponseParser import BaseResponseParser
 import threading
 from openrouter_requests.schemas import OpenrouterRequest
+import asyncio
 from loguru import logger
+import time
 
 class OpenRouter:
     _instance = None
@@ -62,7 +64,6 @@ class OpenRouter:
                 self.__dict__
             )
 
-
     async def send(
             self,
             data: str,
@@ -70,77 +71,138 @@ class OpenRouter:
             dialog_id: Optional[str] = None,
             image: Optional[bytes] = None,
             image_format: Optional[str] = None,
-
     ) -> Dict[str, Any]:
+        start_time = time.time()
+        tasks: List[asyncio.Task] = []
 
         if dialog_id is not None and hasattr(self.context, "set_dialog"):
-            await self.context.set_dialog(dialog_id)
+            tasks.append(asyncio.create_task(self.context.set_dialog(dialog_id)))
+
         extra: Dict[str, Any] = {}
         if dialog_id is not None:
             extra["dialog_id"] = dialog_id
 
         if image is not None and image_format is not None:
-            await self.context.add_image_to_context(
-                text=data,
-                role=role,
-                image_bytes=image,
-                image_format=image_format,
-                **extra
+            tasks.append(
+                asyncio.create_task(
+                    self.context.add_image_to_context(
+                        text=data,
+                        role=role,
+                        image_bytes=image,
+                        image_format=image_format,
+                        **extra
+                    )
+                )
             )
         else:
-            await self.context.add_to_context(
-                data=data,
-                role=role,
-                **extra,
+            tasks.append(
+                asyncio.create_task(
+                    self.context.add_to_context(
+                        data=data,
+                        role=role,
+                        **extra
+                    )
+                )
             )
+
         if self.rag_module is not None:
             rag_docs = await self._rag_search(query=data)
-            await self._add_rag_context(rag_docs, dialog_id=dialog_id)
+            tasks.append(
+                asyncio.create_task(
+                    self._add_rag_context(rag_docs, dialog_id=dialog_id)
+                )
+            )
 
-        payload = await self.builder.build_request(data=OpenrouterRequest(
-            model = self.model,
-            messages = await self.context.get_context(),
-            tools = await self._get_tools_schema()
-        ))
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        payload, tool = await asyncio.gather(
+            self.context.get_context(),
+            self._get_tools_schema()
+        )
+
+        payload = await self.builder.build_request(
+            data=OpenrouterRequest(
+                model=self.model,
+                messages=payload,
+                tools=tool
+            )
+        )
 
         response = await self.request_processor.post(
             url=self.base_url,
             headers=self.header,
-            payload=payload,
+            payload=payload
         )
+
         parsed = await self.parser.parse(response)
+
         if parsed["type"] == "message":
-            await self._add_assistant_message_to_context(parsed, dialog_id=dialog_id)
+            asyncio.create_task(self._add_assistant_message_to_context(parsed, dialog_id=dialog_id))
+            elapsed = time.time() - start_time
+            logger.debug("Время выполнения запроса: {:.3f} сек".format(elapsed))
             return parsed
 
         if parsed["type"] == "tool_calls":
-            tool_results: List[Dict[str, Any]] = []
-            for call in parsed["calls"]:
-                result = await self._run_tool(
+
+            await self.context.add_message({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": call["arguments"],
+                        }
+                    }
+                    for call in parsed["calls"]
+                ],
+                "dialog_id": dialog_id,
+            })
+            tool_results = await asyncio.gather(*[
+                self._run_tool(
                     func_name=call["name"],
                     call_id=call["id"],
                     dialog_id=dialog_id,
-                    **(call["arguments"] or {}),
+                    **call["arguments"]
                 )
-                tool_results.append(result)
+                for call in parsed["calls"]
+            ])
 
-            payload_followup = await self.builder.build_request(OpenrouterRequest(
-                model = self.model,
-                messages = await self.context.get_context(),
-                tools = await self._get_tools_schema()
-            ))
+            payload, tool = await asyncio.gather(
+                self.context.get_context(),
+                self._get_tools_schema()
+            )
+            logger.debug(payload)
+            logger.debug(tool)
+
+            payload_followup = await self.builder.build_request(
+                OpenrouterRequest(
+                    model=self.model,
+                    messages=payload,
+                    tools=tool
+                )
+            )
 
             response_followup = await self.request_processor.post(
                 url=self.base_url,
                 headers=self.header,
-                payload=payload_followup,
+                payload=payload_followup
             )
 
             parsed_followup = await self.parser.parse(response_followup)
+
             if parsed_followup["type"] == "message":
-                await self._add_assistant_message_to_context(parsed_followup, dialog_id=dialog_id)
+                asyncio.create_task(self._add_assistant_message_to_context(parsed_followup, dialog_id=dialog_id))
+
             parsed_followup["tool_results"] = tool_results
+            elapsed = time.time() - start_time
+            logger.debug("Время выполнения запроса: {:.3f} сек".format(elapsed))
             return parsed_followup
+
+        elapsed = time.time() - start_time
+        logger.debug("Время выполнения запроса: {:.3f} сек".format(elapsed))
         return parsed
 
     async def add_system_prompt(
@@ -174,11 +236,11 @@ class OpenRouter:
         if dialog_id is not None:
             extra["dialog_id"] = dialog_id
 
-        await self.context.add_to_context(
+        asyncio.create_task(self.context.add_to_context(
             data=parsed["content"],
             role=parsed.get("role") or "assistant",
             **extra,
-        )
+        ))
 
     async def _get_tools_schema(self) -> List[Dict[str, Any]]:
 
@@ -280,14 +342,16 @@ class OpenRouter:
             "content": content_str,
         }
 
-        extra: Dict[str, Any] = {"tool_call_id" : tool_message["tool_call_id"]}
+        extra: Dict[str, Any] = {"tool_call_id" : tool_message["tool_call_id"],
+                                 "name" : tool_message["name"]}
         if dialog_id is not None:
             extra["dialog_id"] = dialog_id
 
-        await self.context.add_to_context(
-            data=tool_message["content"],
-            role=tool_message["role"],
-            **extra,
-        )
+        await self.context.add_message({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": content_str,
+            "dialog_id": dialog_id,
+        })
 
         return tool_message
