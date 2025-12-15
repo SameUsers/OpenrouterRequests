@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openrouter-requests"
-version = "0.1.0"
+version = "0.1.1"
 description = "Utility for automation RAG system on OpenRouter"
 authors = [
     {name = "Alex", email = "sasandro85@mail.ru"}
