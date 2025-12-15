@@ -143,7 +143,6 @@ class OpenRouter:
             return parsed
 
         if parsed["type"] == "tool_calls":
-
             await self.context.add_message({
                 "role": "assistant",
                 "content": None,
